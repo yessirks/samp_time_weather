@@ -43,11 +43,12 @@ inline bool Paused() {
 }
 inline int ScreenW() { return *(int*)0xC17044; }  // RsGlobal.maximumWidth
 inline int ScreenH() { return *(int*)0xC17048; }
+// Not in a cutscene and the HUD has not been switched off. (FrontEndMenuManager.m_bHudOn, 0xBA6769, is left out on purpose:
+// in SA-MP it reads 0 on most frames while the HUD is clearly on screen, which made keys and the panel ignored at random.)
 inline bool HudVisible() {
     return !*(volatile uint8_t*)0xB6F065   // TheCamera.m_bWideScreenOn (cutscene bars)
         && !*(volatile uint8_t*)0xB5F851   // CCutsceneMgr::ms_running
-        && *(volatile uint8_t*)0xA444A0    // CTheScripts::bDisplayHud
-        && *(volatile uint8_t*)0xBA6769;   // FrontEndMenuManager.m_bHudOn
+        && *(volatile uint8_t*)0xA444A0;   // CTheScripts::bDisplayHud
 }
 
 // CClock: hours/minutes are bytes; the game adds a minute when PerMinute ms have passed since LastTick
@@ -802,7 +803,7 @@ void QuickKeys() {
         std::snprintf(b, sizeof b, "Weather %d: %s", st.weather, kWeatherNames[st.weather]);
         Notify(b);
     }
-    if (sp.Pressed(keys.spStyle)) { ApplySinglePlayerStyle(); Notify("Single-player style: a day in 24 minutes, weather changes by itself"); }
+    if (sp.Pressed(keys.spStyle)) { Log("quick key: single-player style"); ApplySinglePlayerStyle(); Notify("Single-player style: a day in 24 minutes, weather changes by itself"); }
     if (give.Pressed(keys.giveBack)) { GiveBackToServer(); Notify("Time and weather: back to the server"); }
 }
 
@@ -823,9 +824,20 @@ void OnGameFrame() {
         Log("Settings: time %s %02d:%02d (%d ms per minute), weather %s %d", TimeModeName(st.timeMode), st.hour, st.minute, st.msPerMinute,
             WeatherModeName(st.weatherMode), st.weather);
     }
+    const bool focus = GameHasFocus();
+    if (g_log && g_logOn) {  // log only: a bound key is down but nothing will act on it this frame - say why
+        static uint32_t lastDiag = 0;
+        const bool anyHeld = Held(keys.open) || Held(keys.spStyle) || Held(keys.weatherNext) || Held(keys.weatherPrev) ||
+                             Held(keys.timeForward) || Held(keys.timeBack) || Held(keys.giveBack);
+        if (anyHeld && (game::Paused() || !focus || !game::HudVisible()) && GetTickCount() - lastDiag > 400) {
+            lastDiag = GetTickCount();
+            Log("a bound key is down but ignored: paused %d, game window in front %d, HUD visible %d (wide-screen bars %d, cutscene %d, display-hud %d, hud-on %d)",
+                game::Paused() ? 1 : 0, focus ? 1 : 0, game::HudVisible() ? 1 : 0, *(volatile uint8_t*)0xB6F065, *(volatile uint8_t*)0xB5F851,
+                *(volatile uint8_t*)0xA444A0, *(volatile uint8_t*)0xBA6769);
+        }
+    }
     if (game::Paused()) return;
     const uint32_t now = game::TimeMs();
-    const bool focus = GameHasFocus();
     if (focus) {
         if (openKey.Pressed(keys.open)) {
             if (g_open) { g_open = false; if (g_dirty) SaveSettings(); }
