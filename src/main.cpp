@@ -344,6 +344,49 @@ void SetClock(int h, int m) {
     game::LastTick() = game::TimeMs();
 }
 
+// The clock at `minutesToday` (0..1440, with the fraction): hours, minutes and seconds, and the tick the game's own clock code
+// counts the seconds from (so it agrees with us when SA-MP has that code switched on).
+void WriteClock(double minutesToday, uint32_t now) {
+    double t = std::fmod(minutesToday, 1440.0);
+    if (t < 0.0) t += 1440.0;
+    const int h = std::min(23, (int)(t / 60.0));
+    const int m = std::clamp((int)(t - 60.0 * h), 0, 59);
+    const int s = std::clamp((int)((t - std::floor(t)) * 60.0), 0, 59);
+    game::Hours() = (uint8_t)h;
+    game::Minutes() = (uint8_t)m;
+    game::Seconds() = (uint16_t)s;
+    game::LastTick() = now - (uint32_t)(s * (double)game::MsPerMinute() / 60.0);
+}
+
+double CircMinutes(double d) { return std::fmod(d + 1440.0 + 720.0, 1440.0) - 720.0; }
+
+// Log only: how smooth is the running clock? The game takes the sun and the sky colours from hours + minutes/60 + seconds/60,
+// so they move smoothly only if the game's seconds counter climbs steadily every frame. Every 5 s the log gets the worst
+// deviation of the game's clock from a perfectly smooth one, and how often it jumped back or forward.
+void TraceClock() {
+    static double lastM = -1.0, maxErr = 0.0;
+    static int frames = 0, back = 0, jumps = 0;
+    static uint32_t winStart = 0;
+    const double m = game::Hours() * 60.0 + game::Minutes() + game::Seconds() / 60.0;
+    if (lastM >= 0.0) {
+        const double step = CircMinutes(m - lastM);
+        if (step < -0.03) back++;
+        if (step > 0.5) jumps++;
+        maxErr = std::max(maxErr, std::fabs(CircMinutes(m - own.expect)));
+    }
+    lastM = m;
+    frames++;
+    const uint32_t t = GetTickCount();
+    if (!winStart) winStart = t;
+    if (t - winStart >= 5000) {
+        Log("clock (last 5 s, %d frames): worst gap to a perfectly smooth clock %.2f game minutes, jumps back %d, jumps forward %d - now %02d:%02d:%02d",
+            frames, maxErr, back, jumps, game::Hours(), game::Minutes(), game::Seconds());
+        winStart = t;
+        frames = back = jumps = 0;
+        maxErr = 0.0;
+    }
+}
+
 void ApplyTime(uint32_t now) {
     if (st.timeMode == TM_SERVER) {
         if (own.time) {  // hand it back: the server's last clock if it set one meanwhile, else carry on from where we are
@@ -377,28 +420,30 @@ void ApplyTime(uint32_t now) {
         return;
     }
     own.wroteHour = own.wroteMinute = -1;
-    // running: the game's own clock ticks, at our speed. If the server moves it, put it back where it should be.
+    // Running: we keep the time ourselves and write hours, minutes AND seconds every frame. The game takes the sun, the shadows
+    // and the sky colours from hours + minutes/60 + seconds/60, so they only move smoothly if the seconds move. SA-MP switches
+    // the game's own clock code (CClock::Update) off for "no clock" servers and only ever sets hours and minutes, which left the
+    // seconds at 0 and the sun jumping once per game minute.
     game::MsPerMinute() = (uint32_t)st.msPerMinute;
     if (!own.expectValid) {
         own.expect = st.hour * 60 + st.minute;
         own.expectValid = true;
         own.lastNow = now;
-        SetClock(st.hour, st.minute);
-        return;
+    } else {
+        own.expect += (now - own.lastNow) / (double)st.msPerMinute;
+        own.lastNow = now;
+        own.expect -= 1440.0 * std::floor(own.expect / 1440.0);
+        // the game's clock is whole minutes ahead or behind ours: the server moved it
+        if (std::abs(CircDiff(game::Hours() * 60 + game::Minutes(), (int)own.expect)) >= 2) {
+            own.serverHour = game::Hours();
+            own.serverMinute = game::Minutes();
+            own.serverSeen = true;
+        }
     }
-    own.expect += (now - own.lastNow) / (double)st.msPerMinute;
-    own.lastNow = now;
-    if (own.expect >= 1440.0) own.expect -= 1440.0 * std::floor(own.expect / 1440.0);
-    const int exp = (int)own.expect;
-    const int cur = game::Hours() * 60 + game::Minutes();
-    if (std::abs(CircDiff(cur, exp)) >= 2) {  // the server moved it
-        own.serverHour = game::Hours();
-        own.serverMinute = game::Minutes();
-        own.serverSeen = true;
-        SetClock(exp / 60, exp % 60);
-    }
+    WriteClock(own.expect, now);
     st.hour = game::Hours();  // the panel shows the live time
     st.minute = game::Minutes();
+    if (g_log && g_logOn) TraceClock();
 }
 
 void ApplyWeather() {
